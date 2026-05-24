@@ -57,7 +57,7 @@ pipeline {
                               tests/pppoe_cgnat_validation.robot
                         '''
                     } else {
-                        sshagent(credentials: ['raspberry-pi-ssh-key']) {
+                        sshagent(credentials: ['raspi-ssh-key']) {
                             sh '''
                                 . ${VENV_DIR}/bin/activate
                                 robot -d ${RESULTS_DIR} \
