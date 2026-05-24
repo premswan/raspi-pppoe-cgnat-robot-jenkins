@@ -38,7 +38,7 @@ pipeline {
                 expression { return params.USE_SAMPLE == false }
             }
             steps {
-                sshagent(credentials: ['raspberry-pi-ssh-key']) {
+                sshagent(credentials: ['raspi-ssh-key']) {
                     sh '''
                         ssh -o StrictHostKeyChecking=no ${RPI_USER}@${RPI_HOST} "hostname && which tcpdump && which timeout"
                     '''
