@@ -2,128 +2,71 @@ pipeline {
     agent any
 
     parameters {
-        string(name: 'RPI_HOST', defaultValue: '192.168.1.2', description: 'Raspberry Pi management IP address')
-        string(name: 'MIRROR_IFACE', defaultValue: 'eth0', description: 'Raspberry Pi interface connected to Airtel router LAN4 mirrored WAN port')
-        string(name: 'CAPTURE_SECONDS', defaultValue: '20', description: 'tcpdump capture duration in seconds')
-        string(name: 'PACKET_COUNT', defaultValue: '20', description: 'Maximum PPPoE session packets to capture')
-        choice(name: 'GENERATE_TRAFFIC', choices: ['False', 'True'], description: 'Use False when Raspberry Pi is only a passive sniffer on mirror port')
-        string(name: 'PING_TARGET', defaultValue: '8.8.8.8', description: 'Target used only when traffic generation is enabled')
-        string(name: 'PING_COUNT', defaultValue: '4', description: 'Ping packet count when traffic generation is enabled')
+        string(name: 'RPI_HOST', defaultValue: '192.168.1.2', description: 'Raspberry Pi IP address')
+        string(name: 'RPI_USER', defaultValue: 'pi', description: 'Raspberry Pi SSH username')
+        string(name: 'IFACE', defaultValue: 'eth0', description: 'Interface on Raspberry Pi for tcpdump')
+        string(name: 'CAPTURE_SECONDS', defaultValue: '20', description: 'tcpdump capture duration')
+        string(name: 'PACKET_COUNT', defaultValue: '30', description: 'Maximum packet count')
+        booleanParam(name: 'USE_SAMPLE', defaultValue: false, description: 'Use sample tcpdump file instead of Raspberry Pi')
     }
 
     environment {
-        PYTHONUNBUFFERED = '1'
+        VENV_DIR = "${WORKSPACE}/.venv"
+        RESULTS_DIR = "${WORKSPACE}/results"
     }
 
     stages {
-        stage('Checkout') {
+        stage('Checkout from GitHub') {
             steps {
                 checkout scm
             }
         }
 
-        stage('Show Workspace') {
+        stage('Prepare Python Environment') {
             steps {
-                script {
-                    if (isUnix()) {
-                        sh '''
-                            echo "Current workspace:"
-                            pwd
-                            echo "Workspace files:"
-                            ls -la
-                            echo "Robot test files:"
-                            find robot -maxdepth 3 -type f -print
-                        '''
-                    } else {
-                        bat '''
-                            echo Current workspace:
-                            cd
-                            echo Workspace files:
-                            dir
-                            echo Robot folder:
-                            dir robot
-                        '''
-                    }
+                sh '''
+                    python3 -m venv ${VENV_DIR}
+                    . ${VENV_DIR}/bin/activate
+                    pip install --upgrade pip
+                    pip install -r requirements.txt
+                '''
+            }
+        }
+
+        stage('Check Raspberry Pi SSH') {
+            when {
+                expression { return params.USE_SAMPLE == false }
+            }
+            steps {
+                sshagent(credentials: ['raspberry-pi-ssh-key']) {
+                    sh '''
+                        ssh -o StrictHostKeyChecking=no ${RPI_USER}@${RPI_HOST} "hostname && which tcpdump && which timeout"
+                    '''
                 }
             }
         }
 
-        stage('Install Python Dependencies') {
+        stage('Run Robot PPPoE CGNAT Test') {
             steps {
                 script {
-                    if (isUnix()) {
+                    if (params.USE_SAMPLE) {
                         sh '''
-                            set -eux
-                            python3 --version
-                            python3 -m venv .venv
-                            . .venv/bin/activate
-                            python -m pip install --upgrade pip
-                            python -m pip install -r requirements.txt
+                            . ${VENV_DIR}/bin/activate
+                            robot -d ${RESULTS_DIR} \
+                              --variable USE_SAMPLE:True \
+                              tests/pppoe_cgnat_validation.robot
                         '''
                     } else {
-                        bat '''
-                            python --version
-                            python -m venv .venv
-                            .venv\\Scripts\\python.exe -m pip install --upgrade pip
-                            .venv\\Scripts\\python.exe -m pip install -r requirements.txt
-                        '''
-                    }
-                }
-            }
-        }
-
-        stage('Run Robot PPPoE Mirror Tests') {
-            steps {
-                withCredentials([
-                    sshUserPrivateKey(
-                        credentialsId: 'raspi-ssh-key',
-                        keyFileVariable: 'RPI_KEY_FILE',
-                        usernameVariable: 'RPI_SSH_USER',
-                        passphraseVariable: 'RPI_KEY_PASSPHRASE'
-                    )
-                ]) {
-                    script {
-                        if (isUnix()) {
+                        sshagent(credentials: ['raspberry-pi-ssh-key']) {
                             sh '''
-                                set +e
-                                . .venv/bin/activate
-                                mkdir -p results
-
-                                robot --outputdir results \
-                                  --xunit xunit.xml \
-                                  --variable RPI_HOST:"${RPI_HOST}" \
-                                  --variable RPI_USER:"${RPI_SSH_USER}" \
-                                  --variable RPI_KEY_FILE:"${RPI_KEY_FILE}" \
-                                  --variable RPI_KEY_PASSPHRASE:"${RPI_KEY_PASSPHRASE}" \
-                                  --variable MIRROR_IFACE:"${MIRROR_IFACE}" \
-                                  --variable CAPTURE_SECONDS:"${CAPTURE_SECONDS}" \
-                                  --variable PACKET_COUNT:"${PACKET_COUNT}" \
-                                  --variable GENERATE_TRAFFIC:"${GENERATE_TRAFFIC}" \
-                                  --variable PING_TARGET:"${PING_TARGET}" \
-                                  --variable PING_COUNT:"${PING_COUNT}" \
-                                  robot/tests
-
-                                ROBOT_RC=$?
-                                exit ${ROBOT_RC}
-                            '''
-                        } else {
-                            bat '''
-                                if not exist results mkdir results
-
-                                .venv\\Scripts\\python.exe -m robot ^
-                                  --outputdir results ^
-                                  --xunit xunit.xml ^
-                                  --variable "RPI_HOST:%RPI_HOST%" ^
-                                  --variable "RPI_USER:%RPI_SSH_USER%" ^
-                                  --variable "RPI_KEY_FILE:%RPI_KEY_FILE%" ^
-                                  --variable "RPI_KEY_PASSPHRASE:%RPI_KEY_PASSPHRASE%" ^
-                                  --variable "MIRROR_IFACE:%MIRROR_IFACE%" ^
-                                  --variable "CAPTURE_SECONDS:%CAPTURE_SECONDS%" ^
-                                  --variable "PACKET_COUNT:%PACKET_COUNT%" ^
-                                  --variable "GENERATE_TRAFFIC:%GENERATE_TRAFFIC%" ^
-                                  --variable "PING_TARGET:%PING_TARGET%" ^
-                                  --variable "PING_COUNT:%PING_COUNT%" ^
-                                  robot\\tests
+                                . ${VENV_DIR}/bin/activate
+                                robot -d ${RESULTS_DIR} \
+                                  --variable RPI_HOST:${RPI_HOST} \
+                                  --variable RPI_USER:${RPI_USER} \
+                                  --variable IFACE:${IFACE} \
+                                  --variable CAPTURE_SECONDS:${CAPTURE_SECONDS} \
+                                  --variable PACKET_COUNT:${PACKET_COUNT} \
+                                  tests/pppoe_cgnat_validation.robot
                             '''
                         }
                     }
@@ -135,7 +78,16 @@ pipeline {
     post {
         always {
             archiveArtifacts artifacts: 'results/**', allowEmptyArchive: true
-            junit allowEmptyResults: true, testResults: 'results/xunit.xml'
+
+            // Requires Jenkins Robot Framework plugin.
+            // If plugin is not installed, this block may fail.
+            // Remove this block if you only want archived log.html/report.html.
+            robot outputPath: 'results',
+                  outputFileName: 'output.xml',
+                  reportFileName: 'report.html',
+                  logFileName: 'log.html',
+                  passThreshold: 100.0,
+                  unstableThreshold: 0.0
         }
     }
 }

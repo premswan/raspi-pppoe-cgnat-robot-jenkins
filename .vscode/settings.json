@@ -1,9 +1,0 @@
-{
-  "robot.pythonpath": [
-    "${workspaceFolder}/libraries"
-  ],
-  "files.exclude": {
-    "**/__pycache__": true,
-    "results": false
-  }
-}

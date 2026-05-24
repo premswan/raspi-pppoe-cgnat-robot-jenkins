@@ -1,59 +1,252 @@
-# Raspberry Pi PPPoE Mirror Capture - Jenkins + Robot Framework
+# PPPoE CGNAT Validation using GitHub + Jenkins + VS Code + Robot Framework
 
-This project has one Robot Framework testcase. Jenkins connects to Raspberry Pi using an **SSH Username with private key** credential named `raspi-ssh-key`, captures PPPoE session packets from the mirrored WAN port, and prints only normalized public/CGNAT IPv4 flows with source and destination ports.
+## Goal
 
-Example tcpdump input:
+This project demonstrates a complete automation test flow:
 
-```text
-21:54:13.386596 PPPoE [ses 0x2b58] IP 100.103.70.200.13227 > 117.96.122.77.domain: 59384+ PTR? ...
-21:54:13.386603 PPPoE [ses 0x2b58] IP 100.103.70.200.50077 > 87.70.96.34.bc.googleusercontent.com.https: Flags [.], ...
-```
+1. Develop Robot Framework test cases in VS Code.
+2. Store the project in GitHub.
+3. Jenkins pulls the GitHub repository.
+4. Jenkins connects to a Raspberry Pi over SSH.
+5. Raspberry Pi runs `tcpdump` on `eth0`.
+6. Robot Framework parses PPPoE packets.
+7. Test validates that PPPoE source IP belongs to Carrier-Grade NAT range `100.64.0.0/10`.
 
-Console output:
-
-```text
-PPPoE public/CGNAT IP flows with ports: ['100.103.70.200.13227 > 117.96.122.77.domain:', '100.103.70.200.50077 > 87.70.96.34.https:']
-```
-
-`100.103.70.200` is CGNAT, not a true public Internet address, but it is included because many Airtel PPPoE/ISP captures show CGNAT WAN addresses.
-
-## Jenkins credential
-
-Create this credential:
+Example packet:
 
 ```text
-Kind      : SSH Username with private key
-ID        : raspi-ssh-key
-Username  : pi
-Private key: private key that can SSH to Raspberry Pi
+PPPoE  [ses 0x2b58] IP 100.103.70.200.55165 > 20.189.173.26.https:
 ```
 
-The public key must be present on Raspberry Pi:
+Expected validation:
 
 ```text
-/home/pi/.ssh/authorized_keys
+100.103.70.200 is inside 100.64.0.0/10
 ```
 
-## Jenkins parameters
+---
+
+## Repository Structure
 
 ```text
-RPI_HOST          192.168.1.2
-MIRROR_IFACE      eth0
-CAPTURE_SECONDS   20
-PACKET_COUNT      20
-GENERATE_TRAFFIC  False
-PING_TARGET       8.8.8.8
-PING_COUNT         4
+pppoe-cgnat-robot/
+├── Jenkinsfile
+├── requirements.txt
+├── README.md
+├── tests/
+│   └── pppoe_cgnat_validation.robot
+├── resources/
+│   └── PppoeCgnatLibrary.py
+├── scripts/
+│   └── run_local.sh
+└── sample/
+    └── sample_tcpdump.txt
 ```
 
-Keep `GENERATE_TRAFFIC=False` when Raspberry Pi is only a passive sniffer on the mirror port. Generate traffic from another LAN device while Jenkins is running.
+---
 
-## Manual tcpdump equivalent
+## Raspberry Pi Requirements
 
-The Robot keyword uses `-n` so IP addresses remain numeric while ports can still appear as names such as `domain` or `https`:
+Raspberry Pi details used in this project:
+
+```text
+IP address : 192.168.1.2
+Interface  : eth0
+```
+
+Install tcpdump on Raspberry Pi:
 
 ```bash
-sudo -n tcpdump -i eth0 -n -e -vv -s0 -c 20 'ether proto 0x8864'
+sudo apt update
+sudo apt install -y tcpdump
 ```
 
-Full tcpdump output is stored in `results/log.html`, not printed to Jenkins console.
+Verify manually:
+
+```bash
+sudo tcpdump -i eth0
+```
+
+Recommended command for automation:
+
+```bash
+sudo timeout 20 tcpdump -i eth0 -nn -l -c 30
+```
+
+Why `-nn`?
+
+- Avoids DNS/service-name resolution.
+- Shows port numbers instead of names like `https` or `domain`.
+- Makes automation output stable.
+
+Example with `-nn`:
+
+```text
+PPPoE  [ses 0x2b58] IP 100.103.70.200.55165 > 20.189.173.26.443:
+```
+
+---
+
+## Jenkins Agent Requirements
+
+Install these on the Jenkins agent:
+
+```bash
+sudo apt update
+sudo apt install -y python3 python3-pip git openssh-client
+```
+
+Install Robot Framework dependencies:
+
+```bash
+pip3 install -r requirements.txt
+```
+
+---
+
+## Jenkins SSH Access to Raspberry Pi
+
+From Jenkins agent, verify SSH:
+
+```bash
+ssh pi@192.168.1.2 hostname
+```
+
+If using SSH key:
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/jenkins_rpi_key
+ssh-copy-id -i ~/.ssh/jenkins_rpi_key.pub pi@192.168.1.2
+```
+
+Then test:
+
+```bash
+ssh -i ~/.ssh/jenkins_rpi_key pi@192.168.1.2 hostname
+```
+
+For passwordless tcpdump, add sudo permission on Raspberry Pi:
+
+```bash
+sudo visudo
+```
+
+Add this line, replacing `pi` if your user is different:
+
+```text
+pi ALL=(ALL) NOPASSWD: /usr/bin/tcpdump, /usr/bin/timeout
+```
+
+Check tcpdump path:
+
+```bash
+which tcpdump
+which timeout
+```
+
+---
+
+## Run Locally from VS Code Terminal
+
+From project root:
+
+```bash
+pip install -r requirements.txt
+robot -d results \
+  --variable RPI_HOST:192.168.1.2 \
+  --variable RPI_USER:pi \
+  --variable SSH_KEY:$HOME/.ssh/jenkins_rpi_key \
+  --variable IFACE:eth0 \
+  --variable CAPTURE_SECONDS:20 \
+  --variable PACKET_COUNT:30 \
+  tests/pppoe_cgnat_validation.robot
+```
+
+Use sample input without Raspberry Pi:
+
+```bash
+robot -d results --variable USE_SAMPLE:True tests/pppoe_cgnat_validation.robot
+```
+
+---
+
+## Jenkins Job Flow
+
+Jenkins Pipeline stages:
+
+1. Checkout source from GitHub.
+2. Create Python virtual environment.
+3. Install Robot Framework.
+4. SSH check to Raspberry Pi.
+5. Run Robot test.
+6. Archive Robot reports: `log.html`, `report.html`, `output.xml`.
+7. Publish Robot results if Robot Framework plugin is installed.
+
+---
+
+## Test Logic
+
+Robot test case:
+
+```text
+Capture PPPoE packets from Raspberry Pi
+Extract source IP and source port
+Check if source IP belongs to 100.64.0.0/10
+Pass when at least one PPPoE packet source IP is inside CGNAT range
+Fail when no valid CGNAT source IP is found
+```
+
+---
+
+## CGNAT Range
+
+Carrier-Grade NAT IPv4 range:
+
+```text
+100.64.0.0/10
+```
+
+This covers:
+
+```text
+100.64.0.0 to 100.127.255.255
+```
+
+Examples:
+
+```text
+100.103.70.200  -> PASS
+100.64.1.10     -> PASS
+100.127.255.1   -> PASS
+192.168.1.10    -> FAIL
+8.8.8.8         -> FAIL
+```
+
+---
+
+## Useful GitHub Commands
+
+```bash
+git init
+git add .
+git commit -m "Add PPPoE CGNAT Robot Jenkins flow"
+git branch -M main
+git remote add origin https://github.com/<your-user>/pppoe-cgnat-robot.git
+git push -u origin main
+```
+
+---
+
+## Expected Robot Output
+
+Pass example:
+
+```text
+Found CGNAT PPPoE flow: 100.103.70.200:55165 -> 20.189.173.26:443
+```
+
+Fail example:
+
+```text
+No PPPoE packet source IP found inside 100.64.0.0/10
+```
